@@ -42,7 +42,7 @@ def make_tests(subtask: SubTask, code: str) -> str:
 
 
 class Verifier(Protocol):
-    def verify(self, subtask: SubTask, code: str) -> Verdict:
+    def verify(self, subtask: SubTask, code: str | dict[str, str]) -> Verdict:
         ...
 
 
@@ -73,7 +73,99 @@ class GenericVerifier:
         issues = data.get("issues", [])
 
         return Verdict(
-            passed=tests_passed and score >= config.SCORE_THRESHOLD,
+            passed=score >= config.SCORE_THRESHOLD,
+            score=score,
+            tests_passed=True,
+            issues=issues,
+            exec_output=exec_output,
+        )
+
+
+class PythonPackageVerifier:
+    def verify(self, subtask: SubTask, code: dict[str, str]) -> Verdict:
+        # Format package files for prompt context
+        code_str_for_prompt = ""
+        for path, content in code.items():
+            code_str_for_prompt += f"# File: {path}\n{content}\n\n"
+
+        test_code = strip_fences(make_tests(subtask, code_str_for_prompt))
+
+        # Build a self-extracting, isolated test execution script
+        full_code = f"""import os
+import sys
+import tempfile
+import shutil
+
+test_dir = tempfile.mkdtemp()
+orig_dir = os.getcwd()
+os.chdir(test_dir)
+sys.path.insert(0, test_dir)
+
+try:
+    files = {repr(code)}
+    for path, content in files.items():
+        if os.path.dirname(path):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+    with open("test_code.py", "w", encoding="utf-8") as f:
+        f.write({repr(test_code)})
+
+    try:
+        import pytest
+        ret = pytest.main(["test_code.py", "-v"])
+        sys.exit(ret)
+    except ImportError:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("test_code", "test_code.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        failed = False
+        for name in dir(module):
+            if name.startswith("test_") and callable(getattr(module, name)):
+                try:
+                    getattr(module, name)()
+                except AssertionError as e:
+                    print(f"Test {{name}} failed: {{e}}", file=sys.stderr)
+                    failed = True
+                except Exception as e:
+                    print(f"Test {{name}} errored: {{e}}", file=sys.stderr)
+                    failed = True
+        sys.exit(1 if failed else 0)
+finally:
+    os.chdir(orig_dir)
+    try:
+        shutil.rmtree(test_dir)
+    except Exception:
+        pass
+"""
+
+        tests_passed, exec_output = run_code(
+            full_code, timeout=config.EXEC_TIMEOUT
+        )
+
+        if not tests_passed:
+            return Verdict(
+                passed=False,
+                score=0,
+                tests_passed=False,
+                issues=[f"Tests failed: {exec_output}"],
+                exec_output=exec_output,
+            )
+
+        criteria = "\n".join(f"- {c}" for c in subtask.acceptance_criteria)
+        prompt = _JUDGE_PROMPT.format(
+            criteria=criteria, code=code_str_for_prompt, exec_output=exec_output
+        )
+        raw = ask(prompt, model=config.JUDGE_MODEL, system=_JUDGE_SYSTEM)
+        data = json.loads(extract_json(raw))
+        score = int(data["score"])
+        issues = data.get("issues", [])
+
+        return Verdict(
+            passed=score >= config.SCORE_THRESHOLD,
             score=score,
             tests_passed=True,
             issues=issues,
@@ -189,11 +281,12 @@ class SqlVerifier:
 _VERIFIERS: dict[str, Verifier] = {
     "sql": SqlVerifier(),
     "python_module": GenericVerifier(),
+    "python_package": PythonPackageVerifier(),
 }
 
 
 def verify(
-    subtask: SubTask, code: str, output_type: str = "python_module"
+    subtask: SubTask, code: str | dict[str, str], output_type: str = "python_module"
 ) -> Verdict:
     verifier = _VERIFIERS.get(output_type, _VERIFIERS["python_module"])
     return verifier.verify(subtask, code)

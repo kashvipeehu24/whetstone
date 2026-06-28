@@ -16,6 +16,7 @@ from builder_agent.clarify import detect_ambiguity
 from builder_agent.llm import set_budget
 from builder_agent.memory import Memory
 from builder_agent.orchestrate import orchestrate
+from builder_agent.safety import validate_and_resolve_path
 
 # ── Silence noisy HTTP loggers at import time ────────────────────────
 
@@ -320,7 +321,7 @@ def _score_bar(score: int, threshold: int) -> str:
     return f"[{bar}] {bold(str(score))}/10"
 
 
-def _print_result(result: dict, output_path: str = "") -> None:
+def _print_result(result: dict, output_path: str = "", output_dir: str = "") -> None:
     fv = result.get("final_verdict")
     succeeded = result["succeeded"]
 
@@ -360,14 +361,29 @@ def _print_result(result: dict, output_path: str = "") -> None:
 
     artifact = result.get("artifact")
     if artifact:
-        lines = artifact.strip().splitlines()
-        print(f"\n  {bold('Output')} {dim(f'{len(lines)} lines')}")
-        _code_block(artifact)
+        if isinstance(artifact, dict):
+            print(f"\n  {bold('Output')} {dim(f'{len(artifact)} files')}")
+            for path, content in artifact.items():
+                print(f"    {dim('·')} {path} ({len(content.splitlines())} lines)")
+        else:
+            lines = artifact.strip().splitlines()
+            print(f"\n  {bold('Output')} {dim(f'{len(lines)} lines')}")
+            _code_block(artifact)
 
-    if output_path and artifact:
-        with open(output_path, "w") as f:
-            f.write(artifact)
-        print(f"\n  {green('→')} Saved to {bold(output_path)}")
+    if artifact:
+        if isinstance(artifact, dict):
+            out_dir = output_dir or output_path or "./output_package"
+            for rel_path, content in artifact.items():
+                dest = validate_and_resolve_path(out_dir, rel_path)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                with open(dest, "w", encoding="utf-8") as f:
+                    f.write(content)
+            print(f"\n  {green('→')} Saved package to {bold(out_dir)}")
+        else:
+            if output_path:
+                with open(output_path, "w") as f:
+                    f.write(artifact)
+                print(f"\n  {green('→')} Saved to {bold(output_path)}")
 
 
 def _print_help():
@@ -818,7 +834,9 @@ def _cmd_build(args) -> int:
     if args.json:
         print(json.dumps(_to_jsonable(result), indent=2, default=str))
     else:
-        _print_result(result, output_path=args.output)
+        _print_result(
+            result, output_path=args.output, output_dir=args.output_dir
+        )
 
     if result.get("aborted_reason"):
         return EXIT_ABORTED
@@ -974,6 +992,10 @@ def main(argv: list[str] | None = None) -> int:
     build_p.add_argument(
         "--output", type=str, default="",
         help="Write artifact to file",
+    )
+    build_p.add_argument(
+        "--output-dir", type=str, default="",
+        help="Write package artifact to directory",
     )
     build_p.add_argument(
         "--json", action="store_true",

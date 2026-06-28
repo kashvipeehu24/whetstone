@@ -96,6 +96,41 @@ def test_worker_and_judge_use_different_models(mock_ask, mock_run):
     assert models_used[0] != models_used[1]
 
 
+@patch("builder_agent.verify.run_code")
+@patch("builder_agent.verify.ask")
+def test_verify_package_runs_correctly(mock_ask, mock_run):
+    called_run_code = []
+
+    def mock_run_code(full_code, timeout=10):
+        called_run_code.append(full_code)
+        return True, "ok"
+
+    mock_run.side_effect = mock_run_code
+    mock_ask.side_effect = [
+        "assert add(1, 2) == 3",  # make_tests
+        json.dumps({"score": 10, "issues": []}),  # judge
+    ]
+
+    from builder_agent.verify import verify
+    package_files = {
+        "pkg/__init__.py": "from .core import add\n",
+        "pkg/core.py": "def add(a, b): return a + b\n"
+    }
+
+    v = verify(SUBTASK, package_files, output_type="python_package")
+    assert v.passed is True
+    assert v.tests_passed is True
+    assert v.score == 10
+
+    # Assert that the full_code contains the file dict serialization
+    assert len(called_run_code) == 1
+    script = called_run_code[0]
+    assert "pkg/__init__.py" in script
+    assert "pkg/core.py" in script
+    assert "import pytest" in script
+    assert "pytest.main" in script
+
+
 @patch("builder_agent.verify.ask")
 def test_sql_verifier_success(mock_ask):
     mock_ask.return_value = json.dumps({"score": 9, "issues": []})
@@ -138,17 +173,32 @@ def test_sql_verifier_execution_failure(mock_ask):
 
 @patch("builder_agent.verify.SqlVerifier.verify")
 @patch("builder_agent.verify.GenericVerifier.verify")
-def test_dispatcher_selection(mock_generic_verify, mock_sql_verify):
+@patch("builder_agent.verify.PythonPackageVerifier.verify")
+def test_dispatcher_selection(
+    mock_package_verify, mock_generic_verify, mock_sql_verify
+):
     from builder_agent.verify import verify
     verify(SUBTASK, "code", output_type="sql")
     mock_sql_verify.assert_called_once_with(SUBTASK, "code")
     mock_generic_verify.assert_not_called()
+    mock_package_verify.assert_not_called()
 
     mock_sql_verify.reset_mock()
     mock_generic_verify.reset_mock()
+    mock_package_verify.reset_mock()
 
     verify(SUBTASK, "code", output_type="unknown")
     mock_generic_verify.assert_called_once_with(SUBTASK, "code")
+    mock_sql_verify.assert_not_called()
+    mock_package_verify.assert_not_called()
+
+    mock_sql_verify.reset_mock()
+    mock_generic_verify.reset_mock()
+    mock_package_verify.reset_mock()
+
+    verify(SUBTASK, {"file.py": "code"}, output_type="python_package")
+    mock_package_verify.assert_called_once_with(SUBTASK, {"file.py": "code"})
+    mock_generic_verify.assert_not_called()
     mock_sql_verify.assert_not_called()
 
 
