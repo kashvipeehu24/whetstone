@@ -1,7 +1,6 @@
-from datetime import datetime, timedelta, timezone
-
 from builder_agent import config
 from builder_agent.web.history import BuildHistory
+
 
 def test_prune_empty_db(tmp_path):
     history = BuildHistory(str(tmp_path / "history.db"))
