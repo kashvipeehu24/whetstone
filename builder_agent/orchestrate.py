@@ -480,9 +480,10 @@ def orchestrate(
         from builder_agent.web.history import BuildHistory
         history = BuildHistory()
         with _db_lock:
+            history.prune()
             build_id = history.create_build(request, spec.output_type)
-
         orig_on_progress = current_on_progress
+
         def web_on_progress(event: str, data: dict):
             if event == "verdict":
                 from datetime import datetime, timezone

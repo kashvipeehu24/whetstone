@@ -133,3 +133,48 @@ class BuildHistory:
         with self._connect() as conn:
             conn.execute("DELETE FROM attempts")
             conn.execute("DELETE FROM builds")
+
+    def prune(self):
+     with self._connect() as conn:
+        conn.execute(
+            """
+            DELETE FROM attempts
+            WHERE build_id IN (
+                SELECT id FROM builds
+                WHERE created_at < datetime('now', ?)
+            )
+            """,
+            (f"-{config.MAX_AGE_DAYS} days",),
+        )
+
+        conn.execute(
+            """
+            DELETE FROM builds
+            WHERE created_at < datetime('now', ?)
+            """,
+            (f"-{config.MAX_AGE_DAYS} days",),
+        )
+
+        rows = conn.execute(
+            """
+            SELECT id
+            FROM builds
+            ORDER BY created_at DESC
+            LIMIT -1 OFFSET ?
+            """,
+            (config.MAX_BUILDS,),
+        ).fetchall()
+
+        if rows:
+            build_ids = [row[0] for row in rows]
+            placeholders = ",".join("?" * len(build_ids))
+
+            conn.execute(
+                f"DELETE FROM attempts WHERE build_id IN ({placeholders})",
+                build_ids,
+            )
+
+            conn.execute(
+                f"DELETE FROM builds WHERE id IN ({placeholders})",
+                build_ids,
+            )
